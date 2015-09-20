@@ -1,0 +1,648 @@
+---
+title: "Machine Learning Evaluation of Correct Weight Lifting Form"
+author: "Wayne Carriker"
+output: html_document
+---
+
+## Executive Summary
+
+In this assignment we look at data from the Human Activity Recognition (HAR)
+project and attempt to use accelerometer data from several sensors to evaluate
+if an individual is performing a specific exercise correctly or making one of
+several common mistakes. We determine that a C5.0 classification algorithm
+using a subset of the data is able to correctly identify over 99% of a test
+set of data. We then apply that machine learning model to the assignment test
+cases and achieve 100% (20 of 20) first time matches.
+
+```{r, echo=FALSE, warning=FALSE}
+# The entire code suite for this report is exercised up front. This takes on
+# the order of 4 to 5 hours on a 2.6GHz i5 processor with 4GB of memory. The
+# code is duplicated in other portions of the report for documentation purposes.
+
+t0 <- proc.time()
+
+# First, load all the libraries needed for different exercises
+
+library(lattice, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(ggplot2, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(caret, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(adabag, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(rpart, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(mlbench, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(plyr, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(C50, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(RWeka, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(nnet, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(randomForest, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(kernlab, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+
+# Then, load the raw data from the .CSV file and eliminate all the columns that
+# are not useful
+
+raw_data <- read.csv("pml-training.csv")
+no <- grep("^amp|^avg|^kur|^max|^min|^skew|^std|^user|^var|time|window$|^X$",
+           names(raw_data))
+full_data <- raw_data[,-no]
+
+# Now, split the data into training, validation, and final test sets before
+# further evaluation of the data
+
+set.seed(964)
+inTrain <- createDataPartition(y=full_data$classe, p=0.6, list=FALSE)
+full_training <- full_data[inTrain,]
+other <- full_data[-inTrain,]
+inTest <- createDataPartition(y=other$classe, p=0.5, list=FALSE)
+full_testing <- other[inTest,]
+full_validation <- other[-inTest,]
+
+# At this point, feature plots allow us to determine that most of the 52
+# possible predictors won't be useful. In the code, we only keep 1 plot
+
+fplot <- featurePlot(x=full_training[,c("gyros_belt_x","gyros_belt_y",
+                                        "gyros_belt_z", "gyros_arm_x",
+                                        "gyros_arm_y", "gyros_arm_z")],
+                     y=full_training$classe, plot="pairs")
+
+# This analysis allows us to reduce to 16 possible predictors
+
+simpler <- grep("roll|pitch|yaw|total|classe", names(full_data))
+training <- full_training[,simpler]
+validation <- full_validation[,simpler]
+testing <- full_testing[,simpler]
+
+# Now, for the most time consuming portion of the code - generating the initial
+# ten models to determine build times and accuracy against the validation set
+
+# Loop through each of the ten machine learning methods and record the build
+# times and accuracy values so they can be used in the report
+method1 <- c("AdaBag", "C5.0", "JRip", "knn", "nnet",
+             "OneR", "PART", "rf", "rpart", "svmLinear")
+# uncomment the next line to produce a much faster report
+#for(i in 1:10){method1[i]="OneR"}
+vlen <- length(validation$classe)
+first_model <- vector("list", 10)
+v1acc <- 1:10
+exec1 <- 1:10
+for (i in 1:10) {
+    # Reset the random seed each time so that every model is built under the
+    # same starting conditions
+    set.seed(964)
+
+    t1time <- proc.time()
+    # In the code that actually executes, disable the trace on the nnet so
+    # that the report isn't filled with it...
+    if (i == 5) {
+        first_model[[i]] <- train(classe ~ ., method=method1[i], 
+                                  data=training, trace=FALSE)
+    } else {
+        first_model[[i]] <- train(classe ~ ., method=method1[i], data=training)
+    }
+    t2time <- proc.time()
+
+    results <- predict(first_model[[i]], newdata=validation)
+    v1acc[i] <- round(sum(results == validation$classe) / vlen * 100, 1)
+    tdiff <- t2time - t1time
+    exec1[i] <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+}
+lacc <- v1acc[1]
+hacc <- v1acc[1]
+for (i in 2:10) {
+    if (v1acc[i] < lacc) lacc <- v1acc[i]
+    if (v1acc[i] > hacc) hacc <- v1acc[i]
+}
+# Another bit of time consuming code - this time to create 5 additional models
+
+# Reduce the training and validation data sets
+simplest <- grep("^total", names(training))
+simple_training <- training[,-simplest]
+simple_validation <- validation[,-simplest]
+
+# Loop through each of the five machine learning methods and record the build
+# times and accuracy values so they can be used in the report
+method2 <- c("C5.0", "rf", "PART", "JRip", "knn")
+# uncomment the next line for a much faster report generation
+#for(i in 1:5){method2[i]="OneR"}
+second_model <- vector("list", 5)
+v2acc <- 1:5
+exec2 <- 1:5
+for (i in 1:5) {
+    set.seed(964)
+
+    t1time <- proc.time()
+    second_model[[i]] <- train(classe ~ ., method=method2[i], 
+                               data=simple_training)
+    t2time <- proc.time()
+
+    results <- predict(second_model[[i]], newdata=simple_validation)
+    v2acc[i] <- round(sum(results == simple_validation$classe) / vlen * 100, 1)
+    tdiff <- t2time - t1time
+    exec2[i] <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+}
+
+# No new models are needed - for this exercise we're just combining three
+modelC50 <- first_model[[2]]
+modelrf <- first_model[[8]]
+modelPART <- second_model[[3]]
+# Now build a table with the answers as well as the predictions from each model
+answers <- as.data.frame(validation$classe)
+answers$C50 <- predict(modelC50, newdata=validation)
+answers$rf <- predict(modelrf, newdata=validation)
+answers$PART <- predict(modelPART, newdata=simple_validation)
+# Include the accuracies  for each of the models
+C50acc <- round(sum(answers$C50 == validation$classe) / vlen * 100, 1)
+rfacc <- round(sum(answers$rf == validation$classe) / vlen * 100, 1)
+PARTacc <- round(sum(answers$PART == validation$classe) / vlen * 100, 1)
+# Now create the stacked answers - start with just using the answers from C5.0
+answers$final <- answers$C50
+for (i in 1:vlen) {
+    # if C5.0 == rf and rf == PART then the answer will stay C5.0
+    # if C5.0 == rf or C5.0 == PART then the answer will stay C5.0
+    # if rf == PART then the answer will switch to rf
+    # if nothing matches then the answer will stay C5.0
+    if (answers$rf[i] == answers$PART[i]) answers$final[i] <- answers$rf[i]
+}
+stackacc <- round(sum(answers$final == validation$classe) / vlen * 100, 1)
+
+# Time to build another model, this time using all the data
+
+set.seed(964)
+t1time <- proc.time()
+# comment the next line and uncomment the one after that for a faster report
+fullmodel <- train(classe ~ ., method="C5.0", data=full_training)
+#fullmodel <- train(classe ~ ., method="OneR", data=full_training)
+t2time <- proc.time()
+
+fullans <- predict(fullmodel, newdata=full_validation)
+fullacc <- round(sum(fullans == full_validation$classe) / vlen * 100, 1)
+tdiff <- t2time - t1time
+fullbuild <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+
+# Finally build the C5.0 model again with all the validation data too
+
+set.seed(964)
+big_training <- rbind(training, validation)
+# comment the next line and uncomment the one after it for a faster report
+big_model <- train(classe ~ ., method="C5.0", data=big_training)
+#big_model <- train(classe ~ ., method="OneR", data=big_training)
+
+# Compute the accuracy against the entire test set for the original C5.0 and
+# this one too
+
+tlen <- length(testing$classe)
+ans1 <- predict(first_model[[2]], newdata=testing)
+firstacc <- sum(ans1 == testing$classe) / tlen
+ans2 <- predict(big_model, newdata=testing)
+secondacc <- sum(ans2 == testing$classe) / tlen
+
+# Finally compute a range of accuracies by repeatedly sampling the test data 
+
+fla <- firstacc
+fha <- firstacc
+sla <- secondacc
+sha <- secondacc
+for (i in 1:100) {
+    rows <- sample(1:tlen, 1000, replace=TRUE)
+    right1 <- 0
+    right2 <- 0
+    for (j in 1:1000) {
+        if (ans1[rows[j]] == testing$classe[rows[j]]) right1 <- right1 + 1
+        if (ans2[rows[j]] == testing$classe[rows[j]]) right2 <- right2 + 1
+    }
+    thisacc1 <- right1 / 1000
+    thisacc2 <- right2 / 1000
+    if (thisacc1 < fla) fla <- thisacc1
+    if (thisacc1 > fha) fha <- thisacc1
+    if (thisacc2 < sla) sla <- thisacc2
+    if (thisacc2 > sha) sha <- thisacc2
+}
+firstacc <- round(firstacc * 100, 1)
+secondacc <- round(secondacc * 100, 1)
+fla <- round(fla * 100, 1)
+fha <- round(fha * 100, 1)
+sla <- round(sla * 100, 1)
+sha <- round(sha * 100, 1)
+
+# For the final class exercise, use the C5.0 model with 16 predictors and the
+# full training + validation samples used for training
+
+raw_test <- read.csv("pml-testing.csv")
+no <- grep("^amp|^avg|^kur|^max|^min|^skew|^std|^user|^var|time|window$|^X$",
+           names(raw_data))
+test <- raw_test[,-no]
+simpler <- grep("roll|pitch|yaw|total", names(test))
+test <- test[,simpler]
+test$classe <- rep("X",20)
+
+for (i in 1:20) {
+    fo <- file(sprintf("test%02i.txt",i), open = "w")
+    writeLines(as.character(predict(big_model, newdata=test[i,])), fo)
+    close(fo)
+}
+```
+
+## Exploratory Analysis
+
+The first thing we consider is the data to be used in this analysis. Simply
+opening the file in a text editor or Excel allows us to see that the majority
+of the columns are mostly blank or NA and can be dropped before beginning our
+"real" analysis. Several others can be eliminated because they are related to
+the time of the sample or the specific individual being measured. This leaves 
+fifty-two (52) possible predictors in addition to the output.
+
+```{r, eval = FALSE}
+# Load the raw data from the .CSV file and eliminate all the columns that
+# are not useful
+
+raw_data <- read.csv("pml-training.csv")
+no <- grep("^amp|^avg|^kur|^max|^min|^skew|^std|^user|^var|time|window$|^X$",
+           names(raw_data))
+full_data <- raw_data[,-no]
+```
+
+Before beginning further analysis, we split the data into a training set (60%),
+a validation set (20%), and a final test set (20%). We then create feature plots
+of the remaining possible predictors (one such plot is shown below) to evaluate
+the likely value of different possible predictors. 
+
+```{r, eval = FALSE}
+# Load the libraries needed for this evaluation
+
+library(lattice, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(ggplot2, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(caret, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+
+# Now, split the data into training, validation, and final test sets before
+# further evaluation of the data
+
+set.seed(964)
+inTrain <- createDataPartition(y=full_data$classe, p=0.6, list=FALSE)
+full_training <- full_data[inTrain,]
+other <- full_data[-inTrain,]
+inTest <- createDataPartition(y=other$classe, p=0.5, list=FALSE)
+full_testing <- other[inTest,]
+full_validation <- other[-inTest,]
+
+fplot <- featurePlot(x=full_training[,c("gyros_belt_x","gyros_belt_y",
+                                        "gyros_belt_z", "gyros_arm_x",
+                                        "gyros_arm_y", "gyros_arm_z")],
+                     y=full_training$classe, plot="pairs")
+```
+
+```{r, echo=FALSE}
+fplot
+```
+
+In this case, we determine that there does not appear to be any way discriminate
+one output from another based on the raw gyros, accelerometer, or magnet data.
+This leaves 16 possible predictors: roll, pitch, yaw, and total acceleration
+from each of the four sensors on the belt, arm, dumbbell, and forearm.
+
+```{r, eval=FALSE}
+simpler <- grep("roll|pitch|yaw|total|classe", names(full_data))
+training <- full_training[,simpler]
+validation <- full_validation[,simpler]
+testing <- full_testing[,simpler]
+```
+
+We now have a training data set consisting of `r dim(training)[1]` observations
+of `r dim(training)[2]-1` predictors and 1 output, a validation set consisting
+of `r dim(validation)[1]` observations and a final test set consisting of
+`r dim(testing)[1]` observations. The caret package in R provides 192 different
+machine learning algorithms to choose from, of which 147 can be used to build a
+classification model. Given limited time, we can't explore them all, so somewhat
+arbitrarily we choose to try 10 of them: Bagged AdaBoost (AdaBag), C5.0, a 
+Rule-Based Classifier (JRip), k-Nearest Neighbors (knn), a Neural Network 
+(nnet), a Single Rule Classifier (OneR), another Rule-Based Classifier (PART), 
+a Random Forest (rf), CART (rpart), and a Support Vector Machine with Linear
+Kernal (svmLinear). The code for performing these runs can be found in the 
+Appendix.
+
+As shown in the table below, build time for the individual models ranges from
+just a few seconds to the better part of an hour (with a 2.6 GHz i5 processor
+and 4GB of memory), performance against the validation data set ranges from
+`r lacc`% to `r hacc`%, and build time is not well correlated with accuracy. 
+The AdaBag algorithm took the longest time to build a model yet had the third
+worst performance, while the PART and knn algorithms took just over a minute and
+produced the third and fifth best results.
+
+| --------------- | --------------- | ----------------- |
+| Algorithm       | Accuracy        | Build Time        |
+| --------------- | --------------- | ----------------- |
+| `r method1[1]`  | `r v1acc[1]`%   | `r exec1[1]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[2]`  | `r v1acc[2]`%   | `r exec1[2]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[3]`  | `r v1acc[3]`%   | `r exec1[3]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[4]`  | `r v1acc[4]`%   | `r exec1[4]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[5]`  | `r v1acc[5]`%   | `r exec1[5]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[6]`  | `r v1acc[6]`%   | `r exec1[6]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[7]`  | `r v1acc[7]`%   | `r exec1[7]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[8]`  | `r v1acc[8]`%   | `r exec1[8]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[9]`  | `r v1acc[9]`%   | `r exec1[9]` min  |
+| --------------- | --------------- | ----------------- |
+| `r method1[10]` | `r v1acc[10]`%  | `r exec1[10]` min |
+| --------------- | --------------- | ----------------- |
+
+## Additional Exploration
+
+Given that we already identified 3 algorithms that produce better than 95%
+accuracy against the validation data set using the model defaults, we might be
+tempted to simply run the best one against the test set and be done. Instead,
+however, we will explore four alternatives: 1) can we improve on the model
+build times without impacting accuracy by further reducing predictors, 2) can
+we stack the top three models to improve accuracy, 3) can we improve the
+accuracy of the C5.0 algorithm by adding predictors, and finally 4) can we
+improve the accuracy of the C5.0 algorithm by combining the training and
+validation data? The code for each of these exercises can also be found in the
+Appendix.
+
+In the first exercise we note that the total_accel_xxx predictors are 
+correlated with the associated roll, pitch, and yaw predictors and thus they
+may not provide additional classification value. Eliminating these 4 variables
+reduces the problem to 12 predictors: roll, pitch, and yaw values for the belt,
+arm, dumbbell, and forearm sensors. As shown in the table below, however, 
+repeating the top 5 algorithms (C5.0, rf, PART, JRip, and knn) results in little
+change in model creation times, 4 of the models (including the top 2) becoming
+slightly less accurate, and 1 of models actually improving, but not enough to
+change the order.
+
+| -------------- | --------------------------- | ----------------------------------- |
+| Algorithm      | Accuracy                    | Build Time                          |
+| -------------- | --------------------------- | -------------------=--------------- |
+| `r method2[1]` | `r v1acc[2]` > `r v2acc[1]` | `r exec1[2]` min > `r exec2[1]` min |
+| -------------- | --------------------------- | ----------------------------------- |
+| `r method2[2]` | `r v1acc[8]` > `r v2acc[2]` | `r exec1[8]` min > `r exec2[2]` min |
+| -------------- | --------------------------- | ----------------------------------- |
+| `r method2[3]` | `r v1acc[7]` > `r v2acc[3]` | `r exec1[7]` min > `r exec2[3]` min |
+| -------------- | --------------------------- | ----------------------------------- |
+| `r method2[4]` | `r v1acc[3]` > `r v2acc[4]` | `r exec1[3]` min > `r exec2[4]` min |
+| -------------- | --------------------------- | ----------------------------------- |
+| `r method2[5]` | `r v1acc[4]` > `r v2acc[5]` | `r exec1[4]` min > `r exec2[5]` min |
+| -------------- | --------------------------- | ----------------------------------- |
+
+In the next exercise we consider the value of stacking the top three models to
+determine if they can outperform the top model by itself. With five possible
+outputs for each observation, we cannot count on a majority decision for each
+case, so we consider the following: if all three rules agree, then we obviously
+accept that output; if any two of the rules agree, then we accept that output;
+if all three rules produce a different result, then we accept the output of the
+C5.0 model.
+
+As shown in the table below, the combined approach actually results in worse
+performance against the validation set than the C5.0 algorithm alone. This
+indicates that the rf and PART models agree and are wrong while the C5.0 model
+is correct more often than they agree and are correct while the C5.0 model is
+incorrect. The code for this exercise is shown in the Appendix.
+
+| -------------- | ------------ |
+| Algorithm      | Accuracy     |
+| -------------- | -------------|
+| `r method1[2]` | `r v1acc[2]` |
+| -------------- | ------------ |
+| `r method1[8]` | `r v1acc[8]` |
+| -------------- | ------------ |
+| `r method2[3]` | `r v2acc[3]` |
+| -------------- | ------------ |
+| stacked        | `r stackacc` |
+| -------------- | ------------ |
+
+In the third and fourth exercises we will focus on the C5.0 algorithm and see
+if we can first improve the validation results by including more predictors and
+then what impact including more samples in the training set has on the accuracy
+against the final test set. The code for these exercises, as in the previous
+cases, is shown in the Appendix.
+
+In the third case, we simply include the many predictors that were eliminated
+based on the feature plots. Using all 52 predictors results in building a C5.0
+model in `r fullbuild` minutes with an accuracy of `r fullacc`%, which is a bit 
+better than the initial value of `r v1acc[2]`% at a cost of more than two and
+a half times longer model build time.
+
+In the final exercise, we include the validation data in the training data and
+compare the original model's performance against the final test set with that
+of the same model type built with more training data. In this case, we use the
+models to predict the outcomes for multiple samples of the final test set in
+order to get a sense of the accuracy range. The results are shown in the table
+below:
+
+| ---------------------- | -------------- | ------------------- |
+| Algorithm              | Test Accuracy  | Accuracy Range      |
+| ---------------------- | -------------- | ------------------- |
+| C5.0 (original)        | `r firstacc`%  | `r fla`% - `r fha`% |
+| ---------------------- | -------------- | ------------------- |
+| C5.0 w/ added samples  | `r secondacc`% | `r sla`% - `r sha`% |
+| ---------------------- | -------------- | ------------------- |
+
+To complete the assignment, we use our final algorithm to determine the correct
+classification of 20 test cases. This code is also in the Appendix.
+
+## Conclusions
+
+In this assignment we looked at data from the Human Activity Recognition (HAR)
+project and attempted to use accelerometer data from several sensors to evaluate
+if an individual is performing a specific exercise correctly or making one of
+several common mistakes. We determined that a C5.0 classification algorithm
+using a subset of the data is able to correctly identify `r sla`% to `r sha`%
+of a test set of data, and 100% (20 of 20) of the final assignment test cases.
+
+## Appendix
+
+### Initial Analysis
+
+```{r, eval=FALSE}
+# First, load all the libraries needed for different exercises
+
+library(adabag, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(rpart, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(mlbench, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(plyr, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(C50, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(RWeka, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(nnet, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(randomForest, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(kernlab, quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+
+# Loop through each of the ten machine learning methods and record the build
+# times and accuracy values so they can be used in the report
+method1 <- c("AdaBag", "C5.0", "JRip", "knn", "nnet",
+             "OneR", "PART", "rf", "rpart", "svmLinear")
+vlen <- length(validation$classe)
+first_model <- vector("list", 10)
+v1acc <- 1:10
+exec1 <- 1:10
+for (i in 1:10) {
+    # Reset the random seed each time so that every model is built under the
+    # same starting conditions
+    set.seed(964)
+
+    t1time <- proc.time()
+    first_model[[i]] <- train(classe ~ ., method=method1[i], data=training)
+    t2time <- proc.time()
+
+    results <- predict(first_model[[i]], newdata=validation)
+    v1acc[i] <- round(sum(results == validation$classe) / vlen * 100, 1)
+    tdiff <- t2time - t1time
+    exec1[i] <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+}
+lacc <- v1acc[1]
+hacc <- v1acc[1]
+for (i in 2:10) {
+    if (v1acc[i] < lacc) lacc <- v1acc[i]
+    if (v1acc[i] > hacc) hacc <- v1acc[i]
+}
+```
+
+### First Exercise
+
+``` {r, eval=FALSE}
+# Reduce the training and validation data sets
+simplest <- grep("^total", names(training))
+simple_training <- training[,-simplest]
+simple_validation <- validation[,-simplest]
+
+# Loop through each of the five machine learning methods and record the build
+# times and accuracy values so they can be used in the report
+method2 <- c("C5.0", "rf", "PART", "JRip", "knn")
+second_model <- vector("list", 5)
+v2acc <- 1:5
+exec2 <- 1:5
+for (i in 1:5) {
+    set.seed(964)
+
+    t1time <- proc.time()
+    second_model[[i]] <- train(classe ~ ., method=method2[i], 
+                               data=simple_training)
+    t2time <- proc.time()
+
+    results <- predict(second_model[[i]], newdata=simple_validation)
+    v2acc[i] <- round(sum(results == simple_validation$classe) / vlen * 100, 1)
+    tdiff <- t2time - t1time
+    exec2[i] <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+}
+```
+
+### Second Exercise
+
+```{r, eval=FALSE}
+# No new models are needed - for this exercise we're just combining three
+modelC50 <- first_model[[2]]
+modelrf <- first_model[[8]]
+modelPART <- second_model[[3]]
+# Now build a table with the answers as well as the predictions from each model
+answers <- as.data.frame(validation$classe)
+answers$C50 <- predict(modelC50, newdata=validation)
+answers$rf <- predict(modelrf, newdata=validation)
+answers$PART <- predict(modelPART, newdata=simple_validation)
+# Include the accuracies  for each of the models
+C50acc <- round(sum(answers$C50 == validation$classe) / vlen * 100, 1)
+rfacc <- round(sum(answers$rf == validation$classe) / vlen * 100, 1)
+PARTacc <- round(sum(answers$PART == validation$classe) / vlen * 100, 1)
+# Now create the stacked answers - start with just using the answers from C5.0
+answers$final <- answers$C50
+for (i in 1:vlen) {
+    # if C5.0 == rf and rf == PART then the answer will stay C5.0
+    # if C5.0 == rf or C5.0 == PART then the answer will stay C5.0
+    # if rf == PART then the answer will switch to rf
+    # if nothing matches then the answer will stay C5.0
+    if (answers$rf[i] == answers$PART[i]) answers$final[i] <- answers$rf[i]
+}
+stackacc <- round(sum(answers$final == validation$classe) / vlen * 100, 1)
+```
+
+### Third Exercise
+
+```{r, eval=FALSE}
+# Time to build another model, this time using all the data
+
+set.seed(964)
+t1time <- proc.time()
+fullmodel <- train(classe ~ ., method="C5.0", data=full_training)
+t2time <- proc.time()
+
+fullans <- predict(fullmodel, newdata=full_validation)
+fullacc <- round(sum(fullans == full_validation$classe) / vlen * 100, 1)
+tdiff <- t2time - t1time
+fullbuild <- round(as.integer(tdiff[3] - tdiff[2]) / 60, 1)
+```
+
+### Fourth Exercise
+
+```{r, eval=FALSE}
+# Finally build the C5.0 model again with all the validation data too
+
+set.seed(964)
+big_training <- rbind(training, validation)
+big_model <- train(classe ~ ., method="C5.0", data=big_training)
+
+# Compute the accuracy against the entire test set for the original C5.0 and
+# this one too
+
+tlen <- length(testing$classe)
+ans1 <- predict(first_model[[2]], newdata=testing)
+firstacc <- sum(ans1 == testing$classe) / tlen
+ans2 <- predict(big_model, newdata=testing)
+secondacc <- sum(ans2 == testing$classe) / tlen
+
+# Finally compute a range of accuracies by repeatedly sampling the test data 
+
+fla <- firstacc
+fha <- firstacc
+sla <- secondacc
+sha <- secondacc
+for (i in 1:100) {
+    rows <- sample(1:tlen, 1000, replace=TRUE)
+    right1 <- 0
+    right2 <- 0
+    for (j in 1:1000) {
+        if (ans1[rows[j]] == testing$classe[rows[j]]) right1 <- right1 + 1
+        if (ans2[rows[j]] == testing$classe[rows[j]]) right2 <- right2 + 1
+    }
+    thisacc1 <- right1 / 1000
+    thisacc2 <- right2 / 1000
+    if (thisacc1 < fla) fla <- thisacc1
+    if (thisacc1 > fha) fha <- thisacc1
+    if (thisacc2 < sla) sla <- thisacc2
+    if (thisacc2 > sha) sha <- thisacc2
+}
+firstacc <- round(firstacc * 100, 1)
+secondacc <- round(secondacc * 100, 1)
+fla <- round(fla * 100, 1)
+fha <- round(fha * 100, 1)
+sla <- round(sla * 100, 1)
+sha <- round(sha * 100, 1)
+```
+
+### Final Class Exercise
+
+```{r, eval=FALSE}
+# For the final class exercise, use the C5.0 model with 16 predictors and the
+# full training + validation samples used for training
+
+raw_test <- read.csv("pml-testing.csv")
+no <- grep("^amp|^avg|^kur|^max|^min|^skew|^std|^user|^var|time|window$|^X$",
+           names(raw_data))
+test <- raw_test[,-no]
+simpler <- grep("roll|pitch|yaw|total", names(test))
+test <- test[,simpler]
+test$classe <- rep("X",20)
+
+for (i in 1:20) {
+    fo <- file(sprintf("test%02i.txt",i), open = "w")
+    writeLines(as.character(predict(big_model, newdata=test[i,])), fo)
+    close(fo)
+}
+```
+
+```{r, echo=FALSE}
+tf <- proc.time()
+tdiff <- tf - t0
+totaltime <- round(as.integer(tdiff[3] - tdiff[2]) / 3600, 1)
+```
+
+Report time: `r date()` in `r totaltime` hours
